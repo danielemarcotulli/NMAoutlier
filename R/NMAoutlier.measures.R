@@ -350,7 +350,7 @@ NMAoutlier.measures <- function(TE, seTE, treat1, treat2, studlab,
   ## Conduct network meta-analysis (NMA) with random effects model,
   ## Rücker model
   model <- netmeta(TE, seTE, treat1, treat2, studlab,
-                   comb.random = TRUE, reference.group = reference, ...)
+                   random = TRUE, reference.group = reference, ...)
 
 
   ## Model objects
@@ -498,7 +498,7 @@ NMAoutlier.measures <- function(TE, seTE, treat1, treat2, studlab,
       deleted <- studies[i]
       remaining <- studies[studies != deleted]
       remaining.ind <- which(studlab %in% remaining)
-      netmeta.res <- netmeta(TE, seTE, treat1, treat2, studlab, comb.random = TRUE,
+      netmeta.res <- netmeta(TE, seTE, treat1, treat2, studlab, random = TRUE,
                              reference.group = reference, subset = remaining.ind, ...)
 
 
@@ -637,4 +637,252 @@ NMAoutlier.measures <- function(TE, seTE, treat1, treat2, studlab,
   res
 
 
+}
+
+
+NMAoutlier.measures_v2 <- function(TE, seTE, treat1, treat2, studlab,
+                                   data = NULL, sm,
+                                   reference = "", measure = "simple",
+                                   ...) {
+
+  if (!is.character(reference))
+    stop("Argument 'reference' must be a character string!")
+
+  if (is.null(data))
+    data <- sys.frame(sys.parent())
+  mf <- match.call()
+
+  TE <- eval(mf[[match("TE", names(mf))]], data, enclos = sys.frame(sys.parent()))
+
+  if (inherits(TE, "pairwise") ||
+      (is.data.frame(TE) && !is.null(attr(TE, "pairwise")))) {
+    sm      <- attr(TE, "sm")
+    seTE    <- TE$seTE
+    treat1  <- TE$treat1
+    treat2  <- TE$treat2
+    studlab <- TE$studlab
+    TE      <- TE$TE
+  } else {
+    if (missing(sm))
+      if (!is.null(data) && !is.null(attr(data, "sm")))
+        sm <- attr(data, "sm")
+      else
+        sm <- ""
+    seTE    <- eval(mf[[match("seTE",    names(mf))]], data, enclos = sys.frame(sys.parent()))
+    treat1  <- eval(mf[[match("treat1",  names(mf))]], data, enclos = sys.frame(sys.parent()))
+    treat2  <- eval(mf[[match("treat2",  names(mf))]], data, enclos = sys.frame(sys.parent()))
+    studlab <- eval(mf[[match("studlab", names(mf))]], data, enclos = sys.frame(sys.parent()))
+  }
+
+  if (is.factor(treat1)) treat1 <- as.character(treat1)
+  if (is.factor(treat2)) treat2 <- as.character(treat2)
+  if (!is.numeric(studlab))
+    studlab <- as.numeric(as.factor(studlab))
+
+  excl <- is.na(TE) | is.na(seTE) | seTE <= 0
+  if (any(excl)) {
+    warning("Removing comparisons with missing/zero SE.")
+    TE      <- TE[!excl]
+    seTE    <- seTE[!excl]
+    treat1  <- treat1[!excl]
+    treat2  <- treat2[!excl]
+    studlab <- studlab[!excl]
+  }
+
+  if (netconnection(treat1, treat2, studlab)$n.subnets > 1)
+    stop("Network has >1 disconnected component.")
+
+  wo <- treat1 > treat2
+  if (any(wo)) {
+    TE[wo] <- -TE[wo]
+    tmp    <- treat1[wo]
+    treat1[wo] <- treat2[wo]
+    treat2[wo] <- tmp
+  }
+
+  model <- netmeta(TE, seTE, treat1, treat2, studlab,
+                   random = TRUE, reference.group = reference, ...)
+
+  y.m <- model$TE
+  nt  <- model$n
+  tr1 <- model$treat1.pos
+  tr2 <- model$treat2.pos
+  createB <- getFromNamespace("createB", "netmeta")
+  B <- createB(tr1, tr2, nt)
+  ref_idx <- match(reference, model$trts)
+  if (is.na(ref_idx))
+    stop("Reference not found in 'model$trts'!")
+  b <- model$TE.random[, ref_idx]
+
+  dat <- data.frame(TE=TE, seTE=seTE, studlab=studlab, treat1=treat1, treat2=treat2)
+
+  if (measure == "simple") {
+    y.m.est <- model$TE.nma.random
+    rawres  <- y.m - y.m.est
+    eraw    <- res_multi(studlab, rawres)$res
+    standres <- sqrt(model$w.random)*rawres
+    estand   <- res_multi(studlab, standres)$res
+    H.matrix <- if (!is.null(model$H.matrix.random)) model$H.matrix.random else model$H.matrix
+    studres  <- 1/sqrt(1 - diag(H.matrix)) * standres
+    estud    <- res_multi(studlab, studres)$res
+    Mah      <- model$Q.fixed
+    Mahalanobis.distance <- res_multi(studlab, Mah)$res
+    lev <- diag(H.matrix)
+    leverage <- res_multi(studlab, lev)$res
+    res <- list(dat = dat,
+                eraw = eraw,
+                estand = estand,
+                estud = estud,
+                Mah = Mah,
+                Mahalanobis.distance = Mahalanobis.distance,
+                lev = lev,
+                leverage = leverage,
+                measure = measure)
+    class(res) <- "NMAoutlier.measures"
+    return(res)
+  }
+
+  if (measure == "deletion") {
+    eraw.deleted       <- list()
+    estand.deleted     <- list()
+    estud.deleted      <- list()
+    Cooks.distance     <- list()
+    Covratio           <- list()
+    w.leaveoneout      <- list()
+    H.leaveoneout      <- list()
+    heterog.leaveoneout<- list()
+    Rheterogeneity     <- list()
+    RQtotal            <- list()
+    RQhet              <- list()
+    RQinc              <- list()
+    DFbetas            <- NULL
+    Rstat.estimates    <- NULL
+
+    Q.standard  <- model$Q
+    Qh.standard <- model$Q.heterogeneity
+    Qi.standard <- netmeta::decomp.design(model)$Q.inc.random$Q
+    t2_full     <- (model$tau)^2
+
+    L.full <- t(B) %*% diag(model$w.random) %*% B
+    L.rc   <- L.full - 1/nt
+    Lplus  <- solve(L.rc) + 1/nt
+    t.pos1 <- rep(ref_idx, nt - 1)
+    t.pos2 <- setdiff(seq_len(nt), ref_idx)
+    B.r <- createB(t.pos1, t.pos2, nt)
+    Cov_full <- B.r %*% Lplus %*% t(B.r)
+
+    studies <- unique(studlab)
+    library(MASS)
+
+    for (i in seq_along(studies)) {
+      st.del      <- studies[i]
+      ind.deleted <- which(studlab == st.del)
+      ind.keep    <- setdiff(seq_along(studlab), ind.deleted)
+
+      nm_loo <- netmeta(TE, seTE, treat1, treat2, studlab,
+                        random = TRUE,
+                        reference.group = reference,
+                        subset = ind.keep, ...)
+      ref_idx_del <- match(reference, nm_loo$trts)
+      if (is.na(ref_idx_del)) next
+      esti_loo_raw <- nm_loo$TE.random[, ref_idx_del]
+      trts_loo     <- nm_loo$trts
+      full_trts    <- model$trts
+      map_loo      <- match(full_trts, trts_loo)
+      esti_loo     <- rep(NA, nt)
+      valid_idx    <- which(!is.na(map_loo))
+      esti_loo[valid_idx] <- esti_loo_raw[ map_loo[valid_idx] ]
+
+      Bi     <- B[ind.deleted, , drop=FALSE]
+      obs_TE <- y.m[ind.deleted]
+      rawres <- obs_TE - (Bi %*% esti_loo)
+      eraw.deleted[[i]] <- res_multi(studlab[ind.deleted], rawres)$res
+
+      wv <- model$w.random
+      wv[ind.deleted] <- 0
+      Wi <- diag(wv[ind.deleted], nrow=length(ind.deleted), ncol=length(ind.deleted))
+      Hii_mat <- Bi %*% ginv(t(Bi) %*% Wi %*% Bi) %*% t(Bi) %*% Wi
+      hii <- diag(Hii_mat)
+      H.leaveoneout[[i]] <- res_multi(studlab[ind.deleted], hii)$res
+
+      heterog_loo <- (nm_loo$tau)^2
+      s.m <- seTE[ind.deleted]
+      w.leave <- 1/(s.m^2 + heterog_loo)
+      w.leaveoneout[[i]] <- res_multi(studlab[ind.deleted], w.leave)$res
+
+      standres <- sqrt(w.leave)*rawres
+      estand.deleted[[i]] <- res_multi(studlab[ind.deleted], standres)$res
+      studres <- 1/sqrt((s.m^2 + heterog_loo) + hii*w.leave)*rawres
+      estud.deleted[[i]] <- res_multi(studlab[ind.deleted], studres)$res
+
+      diff_vec <- (b - esti_loo)[-ref_idx]
+      Cov_sub  <- Cov_full[-1, -1, drop=FALSE]
+      if (all(!is.na(diff_vec))) {
+        cd <- diff_vec %*% ginv(Cov_sub) %*% diff_vec
+        Cooks.distance[[i]] <- cd
+      } else {
+        Cooks.distance[[i]] <- NA
+      }
+
+      w_loo <- model$w.random
+      w_loo[ind.deleted] <- 0
+      L_loo <- t(B) %*% diag(w_loo) %*% B
+      L_loo_rc <- L_loo - 1/nt
+      Lplus_loo <- solve(L_loo_rc) + 1/nt
+      Cov_remove <- B.r %*% Lplus_loo %*% t(B.r)
+      Covratio[[i]] <- tryCatch(
+        det(Cov_remove)/det(Cov_full),
+        error = function(e) NA
+      )
+
+      Rheterogeneity[[i]] <- 100 * ((t2_full - heterog_loo)/t2_full)
+      heterog.leaveoneout[[i]] <- heterog_loo
+
+      Qt  <- nm_loo$Q
+      Qhe <- nm_loo$Q.heterogeneity
+      Qin <- netmeta::decomp.design(nm_loo)$Q.inc.random$Q
+      RQtotal[[i]] <- 100*(Q.standard - Qt)/Q.standard
+      RQhet[[i]]   <- 100*(Qh.standard - Qhe)/Qh.standard
+      RQinc[[i]]   <- 100*(Qi.standard - Qin)/Qi.standard
+
+      if (all(!is.na(esti_loo))) {
+        Re <- 100*((b[-ref_idx] - esti_loo[-ref_idx])/b[-ref_idx])
+        Rstat.estimates <- cbind(Rstat.estimates, Re)
+      } else {
+        Rstat.estimates <- cbind(Rstat.estimates, rep(NA, length(b)-1))
+      }
+
+      DFbeta <- (b[-ref_idx] - esti_loo[-ref_idx]) * sqrt(sum(w.leave)/length(w.leave))
+      DFbetas <- cbind(DFbetas, DFbeta)
+    }
+
+    res <- list(
+      dat = dat,
+      eraw.deleted = unlist(eraw.deleted),
+      estand.deleted = unlist(estand.deleted),
+      estud.deleted = unlist(estud.deleted),
+      Cooks.distance = unlist(Cooks.distance),
+      Covratio = unlist(Covratio),
+      w.leaveoneout = unlist(w.leaveoneout),
+      H.leaveoneout = unlist(H.leaveoneout),
+      heterog.leaveoneout = unlist(heterog.leaveoneout),
+      Rheterogeneity = unlist(Rheterogeneity),
+      Restimates = Rstat.estimates,
+      RQtotal = unlist(RQtotal),
+      RQhet = unlist(RQhet),
+      RQinc = unlist(RQinc),
+      DFbetas = DFbetas,
+      measure = measure
+    )
+    class(res) <- "NMAoutlier.measures"
+    return(res)
+  }
+
+  stop("measure must be 'simple' or 'deletion'.")
+}
+
+res_multi <- function(studlab, x) {
+  # Simple helper to aggregate multiple comparisons per study
+  u <- tapply(x, studlab, mean, na.rm=TRUE)
+  data.frame(study=as.numeric(names(u)), res=as.numeric(u))
 }
