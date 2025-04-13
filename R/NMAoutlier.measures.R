@@ -645,7 +645,7 @@ NMAoutlier.measures <- function(TE, seTE, treat1, treat2, studlab,
                                    data = NULL, sm,
                                    reference = "", measure = "simple",
                                    ...) {
-
+  eps <- 1e-6
   if (!is.character(reference))
     stop("Argument 'reference' must be a character string!")
 
