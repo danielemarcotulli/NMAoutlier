@@ -639,6 +639,7 @@
 
 # }
 
+library(MASS)
 
 NMAoutlier.measures <- function(TE, seTE, treat1, treat2, studlab,
                                    data = NULL, sm,
@@ -772,7 +773,26 @@ NMAoutlier.measures <- function(TE, seTE, treat1, treat2, studlab,
     Cov_full <- B.r %*% Lplus %*% t(B.r)
 
     studies <- unique(studlab)
-    library(MASS)
+
+    doubleTryCook <- function(diff_vec, Cov_sub, eps = 1e-6) {
+        # First try with Cov_sub as is
+        out <- tryCatch({
+          diff_vec %*% MASS::ginv(Cov_sub) %*% diff_vec
+        }, error = function(e1) {
+          # If it fails, we do a second attempt with diagonal "ridge"
+          Cov_stable <- Cov_sub + diag(eps, nrow(Cov_sub))
+          out2 <- tryCatch({
+            diff_vec %*% MASS::ginv(Cov_stable) %*% diff_vec
+          }, error = function(e2) {
+            # If it also fails, return NA
+            NA_real_
+          })
+          out2
+        })
+        
+        # out is either a numeric value or NA
+        out
+      }
 
     for (i in seq_along(studies)) {
       st.del      <- studies[i]
@@ -783,6 +803,43 @@ NMAoutlier.measures <- function(TE, seTE, treat1, treat2, studlab,
                         random = TRUE,
                         reference.group = reference,
                         subset = ind.keep, ...)
+
+      nc_loo <- netconnection(
+        treat1  = treat1[ind.keep],
+        treat2  = treat2[ind.keep],
+        studlab = studlab[ind.keep]
+      )
+      
+      # If the network is disconnected
+      if (nc_loo$n.subnets > 1) {
+        eraw.deleted[[i]]       <- NA
+        estand.deleted[[i]]     <- NA
+        estud.deleted[[i]]      <- NA
+        Cooks.distance[[i]]     <- NA
+        Covratio[[i]]           <- NA
+        w.leaveoneout[[i]]      <- NA
+        H.leaveoneout[[i]]      <- NA
+        heterog.leaveoneout[[i]]<- NA
+        Rheterogeneity[[i]]     <- NA
+        RQtotal[[i]]            <- NA
+        RQhet[[i]]              <- NA
+        RQinc[[i]]              <- NA
+
+        # If you want DFbetas and Restimates to also have columns for each study:
+        if (!is.null(DFbetas)) {
+          DFbetas <- cbind(DFbetas, rep(NA, nrow(DFbetas)))
+        } else {
+          # or if DFbetas is still NULL, handle that logic carefully
+        }
+        if (!is.null(Rstat.estimates)) {
+          Rstat.estimates <- cbind(Rstat.estimates, rep(NA, nrow(Rstat.estimates)))
+        } else {
+          # same logic if Rstat.estimates is still NULL
+        }
+
+        # Proceed to next study
+        next
+      }         
       ref_idx_del <- match(reference, nm_loo$trts)
       if (is.na(ref_idx_del)) next
       esti_loo_raw <- nm_loo$TE.random[, ref_idx_del]
@@ -814,11 +871,13 @@ NMAoutlier.measures <- function(TE, seTE, treat1, treat2, studlab,
       estand.deleted[[i]] <- res_multi(studlab[ind.deleted], standres)$res
       studres <- 1/sqrt((s.m^2 + heterog_loo) + hii*w.leave)*rawres
       estud.deleted[[i]] <- res_multi(studlab[ind.deleted], studres)$res
+      
+
 
       diff_vec <- (b - esti_loo)[-ref_idx]
       Cov_sub  <- Cov_full
       if (all(!is.na(diff_vec))) {
-        cd <- diff_vec %*% ginv(Cov_sub) %*% diff_vec
+        cd <- doubleTryCook(diff_vec, Cov_sub, eps = 1e-6)
         Cooks.distance[[i]] <- cd
       } else {
         Cooks.distance[[i]] <- NA
