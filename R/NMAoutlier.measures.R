@@ -794,6 +794,27 @@ NMAoutlier.measures <- function(TE, seTE, treat1, treat2, studlab,
         out
       }
 
+    makeHat <- function(Bi, Wi, eps = 1e-6) {
+      # Attempt to invert M = t(Bi) %*% Wi %*% Bi
+      M <- t(Bi) %*% Wi %*% Bi
+      
+      # First try
+      hatmat <- tryCatch({
+        Bi %*% MASS::ginv(M) %*% t(Bi) %*% Wi
+      }, error = function(e1) {
+        # If that fails, add ridge
+        M_stable <- M + diag(eps, nrow(M))
+        out2 <- tryCatch({
+          Bi %*% MASS::ginv(M_stable) %*% t(Bi) %*% Wi
+        }, error = function(e2) {
+          # final fallback: NA
+          NA
+        })
+        out2
+      })
+      hatmat
+    }
+
     for (i in seq_along(studies)) {
       st.del      <- studies[i]
       ind.deleted <- which(studlab == st.del)
@@ -858,8 +879,13 @@ NMAoutlier.measures <- function(TE, seTE, treat1, treat2, studlab,
       wv <- model$w.random
       wv[ind.deleted] <- 0
       Wi <- diag(wv[ind.deleted], nrow=length(ind.deleted), ncol=length(ind.deleted))
-      Hii_mat <- Bi %*% ginv(t(Bi) %*% Wi %*% Bi) %*% t(Bi) %*% Wi
-      hii <- diag(Hii_mat)
+      Hii_mat <- makeHat(Bi, Wi, eps = 1e-6)
+      if (is.matrix(Hii_mat)) {
+        hii <- diag(Hii_mat)
+      } else {
+        # The inversion was not possible, store NA for that iteration
+        hii <- rep(NA, length(ind.deleted))
+      }
       H.leaveoneout[[i]] <- res_multi(studlab[ind.deleted], hii)$res
 
       heterog_loo <- (nm_loo$tau)^2
@@ -887,13 +913,25 @@ NMAoutlier.measures <- function(TE, seTE, treat1, treat2, studlab,
       w_loo[ind.deleted] <- 0
       L_loo <- t(B) %*% diag(w_loo) %*% B
       L_loo_rc <- L_loo - 1/nt
-      Lplus_loo <- solve(L_loo_rc) + 1/nt
-      Cov_remove <- B.r %*% Lplus_loo %*% t(B.r)
+      Lplus_loo <- tryCatch({
+        solve(L_loo_rc) + 1/nt
+      }, error = function(e) {
+        # Try adding a small ridge
+        L_loo_rc_ridge <- L_loo_rc + diag(eps, nrow(L_loo_rc))
+        tryCatch({
+          solve(L_loo_rc_ridge) + 1/nt
+        }, error=function(e2) NA)
+      })
+      if (is.matrix(Lplus_loo)) {
+        Cov_remove <- B.r %*% Lplus_loo %*% t(B.r)
+      } else {
+        Cov_remove <- matrix(NA, nrow=nrow(B.r), ncol=nrow(B.r))
+      }
       Covratio[[i]] <- tryCatch(
         det(Cov_remove)/det(Cov_full),
         error = function(e) NA
       )
-
+  
       Rheterogeneity[[i]] <- 100 * ((t2_full - heterog_loo)/t2_full)
       heterog.leaveoneout[[i]] <- heterog_loo
 
