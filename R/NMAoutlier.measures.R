@@ -816,7 +816,7 @@ NMAoutlier.measures <- function(TE, seTE, treat1, treat2, studlab,
       estud.deleted[[i]] <- res_multi(studlab[ind.deleted], studres)$res
 
       diff_vec <- (b - esti_loo)[-ref_idx]
-      Cov_sub  <- Cov_full[-1, -1, drop=FALSE]
+      Cov_sub  <- Cov_full
       if (all(!is.na(diff_vec))) {
         cd <- diff_vec %*% ginv(Cov_sub) %*% diff_vec
         Cooks.distance[[i]] <- cd
